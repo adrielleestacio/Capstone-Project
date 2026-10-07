@@ -24,16 +24,18 @@ Use the same values described in [README.md](README.md) and [.env.example](.env.
 
 ## 2) Deploy the system on Render
 
-The root `render.yaml` deploys all three services as one Blueprint:
+The root `render.yaml` deploys the frontend, backend, ML service, and admin
+panel as one Blueprint:
 
 - `habitai-ml`: FastAPI service. Render generates its `ML_SERVICE_API_KEY`.
 - `habitai-backend`: Express API. Its ML service URL and API key are linked automatically.
 - `habitai-frontend`: Expo web export hosted as a Static Site. Its API URLs are linked automatically to the backend; its Neon Auth URL is provided separately.
+- `habitai-admin`: static admin dashboard.
 
 1. Create or connect a Neon project and have its `DATABASE_URL`, `AUTH_URL`, `JWKS_URL`, and public Neon Auth base URL ready. The JWKS URL must end in `/.well-known/jwks.json`. The frontend auth URL is the Neon Auth base URL used by the client, not the backend API URL.
 2. Push the repository to GitHub.
 3. In Render, select **New** -> **Blueprint** and connect this repository.
-4. Provide the prompted values, including backend Neon credentials, `ALLOWED_ORIGINS`, Gemini API key, SMTP settings, and the frontend `EXPO_PUBLIC_AUTH_URL`. For `ALLOWED_ORIGINS`, enter the frontend's Render origin (for example, `https://habitai-frontend.onrender.com`). If Render assigns a different URL, update it in the backend after the first sync.
+4. Provide the prompted values, including backend Neon credentials, `ALLOWED_ORIGINS`, `ADMIN_EMAILS`, `ADMIN_JWT_SECRET`, `ADMIN_REGISTRATION_KEY`, Gemini API key, SMTP settings, and the frontend `EXPO_PUBLIC_AUTH_URL`. Set `ADMIN_EMAILS` to the comma-separated administrator emails. Generate two separate random secrets of at least 32 characters for the JWT signing secret and registration key. For `ALLOWED_ORIGINS`, include both the frontend and admin Render origins (for example, `https://habitai-frontend.onrender.com,https://habitai-admin.onrender.com`). If Render assigns different URLs, update this backend setting after the first sync.
 5. Deploy the Blueprint. Keep `ML_MODEL_RELEASE_APPROVED=false` until real approved training outcomes and an independent holdout report have been verified.
 6. `EXPO_PUBLIC_API_URL` and `EXPO_PUBLIC_AI_API_URL` are injected from the backend URL. `EXPO_PUBLIC_AUTH_URL` must point to the Neon Auth client endpoint. It is compiled into the public web bundle, so it must be a public URL, never a secret. Render only prompts for `sync: false` values when a Blueprint is first created; add or update this value in the service's Environment settings after that.
 

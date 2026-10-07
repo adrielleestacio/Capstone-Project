@@ -5,6 +5,7 @@ This monorepo is organized into separate application layers:
 - `frontend/` — Expo + React Native mobile/web app
 - `backend/` — Node/Express backend services
 - `ml-service/` — Python FastAPI machine learning prediction service
+- `../Admin/` — responsive web dashboard for administrators
 
 ## Neon database data layer
 
@@ -78,6 +79,26 @@ You can also run them individually:
 npm run backend
 npm run frontend
 ```
+
+## Admin panel
+
+Set `ADMIN_EMAILS` in `backend/.env` to the comma-separated admin email
+allowlist. Also set `ADMIN_REGISTRATION_KEY` to a random secret and a different
+random value for `ADMIN_JWT_SECRET` (at least 32 characters each). Registration
+requires an allowlisted email and the registration key. The API issues
+eight-hour HS256 JWTs, stores token hashes for revocation, and checks the
+account's admin role on each request. Then start the API and serve the panel in
+another terminal:
+
+```bash
+npm run dev:backend
+npm run admin
+```
+
+Open http://localhost:8080 and register with the allowlisted email and registration key. Sign in after registration to return to the panel. The panel
+shows community metrics, daily sign-ups and habit activity, ML service health,
+user engagement, and support report status. In production, host `../Admin/`
+as a static site and include its HTTPS origin in the backend `ALLOWED_ORIGINS`.
 
 ## Docker stack
 

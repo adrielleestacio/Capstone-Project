@@ -30,6 +30,12 @@ services:
           envVarKey: ML_SERVICE_API_KEY
       - key: ALLOWED_ORIGINS
         sync: false
+      - key: ADMIN_EMAILS
+        sync: false
+      - key: ADMIN_JWT_SECRET
+        sync: false
+      - key: ADMIN_REGISTRATION_KEY
+        sync: false
       - key: EXTERNAL_REQUEST_TIMEOUT_MS
         value: 15000
       - key: GEMINI_API_KEY
@@ -71,6 +77,13 @@ services:
         value: 8000
       - key: NODE_ENV
         value: production
+
+  - type: web
+    name: habitai-admin
+    runtime: static
+    rootDir: Admin Panel
+    buildCommand: echo "Static admin panel"
+    staticPublishPath: .
 
   - type: web
     name: habitai-frontend

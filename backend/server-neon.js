@@ -19,6 +19,7 @@ import { mergeAppState, normalizeAppState } from './services/app-state-sync.js';
 import { hasValidFileSignature, removeUploadedFile, uploadIssueAttachment } from './services/file-upload.js';
 import {
   assistantSchema,
+  adminRegisterSchema,
   emailSchema as email,
   goalGenerationSchema,
   habitCompletionSchema,
@@ -84,10 +85,15 @@ const isConfiguredSecret = (value, allowDevelopmentKey = false) => Boolean(
   && (allowDevelopmentKey || (value.trim().length >= 32 && !value.startsWith('dev-only-'))),
 );
 if (isProduction && !isConfiguredSecret(mlKey)) throw new Error('ML_SERVICE_API_KEY must be configured.');
+const adminJwtSecret = process.env.ADMIN_JWT_SECRET?.trim() || (!isProduction ? crypto.randomBytes(48).toString('base64url') : '');
+const adminRegistrationKey = process.env.ADMIN_REGISTRATION_KEY?.trim() || '';
+if (isProduction && !isConfiguredSecret(adminJwtSecret)) throw new Error('ADMIN_JWT_SECRET must be configured with a random secret of at least 32 characters.');
+if (isProduction && !isConfiguredSecret(adminRegistrationKey)) throw new Error('ADMIN_REGISTRATION_KEY must be configured with a random secret of at least 32 characters.');
 if (isProduction && isLocalUrl(mlUrl)) throw new Error('ML_SERVICE_URL must not use localhost in production.');
 if (isProduction && !process.env.ALLOWED_ORIGINS?.trim()) throw new Error('ALLOWED_ORIGINS must be configured in production.');
 const timeoutMs = Math.max(1000, Number(process.env.EXTERNAL_REQUEST_TIMEOUT_MS) || 15000);
 const sessionLifetimeMs = 7 * 24 * 60 * 60 * 1000;
+const adminTokenLifetimeMs = 8 * 60 * 60 * 1000;
 const resetLifetimeMs = 5 * 60 * 1000;
 const resetCooldownMs = 60 * 1000;
 const maxOtpAttempts = 5;
@@ -208,16 +214,59 @@ async function requireAuth(request, response) {
   if (!session) { response.status(401).json({ ok: false, message: 'Authentication required.' }); return null; }
   return session;
 }
+const adminEmails = new Set((process.env.ADMIN_EMAILS || '').split(',').map((email) => normalizeEmail(email)).filter(Boolean));
+function signAdminJwt(user) {
+  const now = Math.floor(Date.now() / 1000);
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({ iss: 'habitai-admin', aud: 'habitai-admin-panel', sub: user.id, email: user.email, role: 'admin', iat: now, exp: now + adminTokenLifetimeMs / 1000 })).toString('base64url');
+  const signingInput = `${header}.${payload}`;
+  const signature = crypto.createHmac('sha256', adminJwtSecret).update(signingInput).digest('base64url');
+  return `${signingInput}.${signature}`;
+}
+function verifyAdminJwt(token) {
+  try {
+    const [headerPart, payloadPart, signaturePart, extra] = token.split('.');
+    if (!headerPart || !payloadPart || !signaturePart || extra) return null;
+    const header = JSON.parse(Buffer.from(headerPart, 'base64url').toString('utf8'));
+    const claims = JSON.parse(Buffer.from(payloadPart, 'base64url').toString('utf8'));
+    if (header.alg !== 'HS256' || header.typ !== 'JWT') return null;
+    const expected = crypto.createHmac('sha256', adminJwtSecret).update(`${headerPart}.${payloadPart}`).digest();
+    const supplied = Buffer.from(signaturePart, 'base64url');
+    if (expected.length !== supplied.length || !crypto.timingSafeEqual(expected, supplied)) return null;
+    const now = Math.floor(Date.now() / 1000);
+    if (claims.iss !== 'habitai-admin' || claims.aud !== 'habitai-admin-panel' || claims.role !== 'admin' || !claims.sub || !claims.email || !Number.isInteger(claims.exp) || claims.exp <= now) return null;
+    return claims;
+  } catch { return null; }
+}
+async function issueAdminJwt(user) {
+  const token = signAdminJwt(user);
+  const expiresAt = Date.now() + adminTokenLifetimeMs;
+  await query('INSERT INTO sessions(token_hash,user_id,expires_at) VALUES($1,$2,$3)', [hashToken(token), user.id, expiresAt]);
+  return token;
+}
+async function requireAdmin(request, response) {
+  const token = authToken(request);
+  const claims = token ? verifyAdminJwt(token) : null;
+  if (!claims) { response.status(401).json({ ok: false, message: 'A valid administrator JWT is required.' }); return null; }
+  if (!adminEmails.has(normalizeEmail(claims.email))) {
+    response.status(403).json({ ok: false, message: 'Administrator access is not enabled for this account.' });
+    return null;
+  }
+  const result = await query(`SELECT u.id, u.id AS "userId", u.full_name AS "fullName", u.username, u.email, u.date_of_birth AS "dateOfBirth", u.gender, u.region, u.about
+    FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.user_id=$2 AND s.expires_at>$3 AND u.email=$4 AND u.is_admin=TRUE`, [hashToken(token), claims.sub, Date.now(), normalizeEmail(claims.email)]);
+  if (!result.rows[0]) { response.status(401).json({ ok: false, message: 'Administrator token has expired or was revoked.' }); return null; }
+  return result.rows[0];
+}
 async function createSession(userId) {
   const token = crypto.randomBytes(32).toString('hex');
   await query('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)', [hashToken(token), userId, Date.now() + sessionLifetimeMs]);
   return token;
 }
 async function findUser(emailAddress) {
-  const result = await query('SELECT id, full_name AS "fullName", username, email, date_of_birth AS "dateOfBirth", gender, region, about, password_hash AS "passwordHash" FROM users WHERE email = $1', [normalizeEmail(emailAddress)]);
+  const result = await query('SELECT id, full_name AS "fullName", username, email, date_of_birth AS "dateOfBirth", gender, region, about, password_hash AS "passwordHash", is_admin AS "isAdmin" FROM users WHERE email = $1', [normalizeEmail(emailAddress)]);
   return result.rows[0] || null;
 }
-function safeOriginList() { return new Set((process.env.ALLOWED_ORIGINS || 'http://localhost:19006,http://localhost:19080,http://localhost:8081').split(',').map((item) => item.trim()).filter(Boolean)); }
+function safeOriginList() { return new Set((process.env.ALLOWED_ORIGINS || 'http://localhost:19006,http://localhost:19080,http://localhost:8080,http://localhost:8081').split(',').map((item) => item.trim()).filter(Boolean)); }
 const origins = safeOriginList();
 function isLocalDevelopmentOrigin(origin) {
   if (isProduction) return false;
@@ -229,7 +278,7 @@ function isLocalDevelopmentOrigin(origin) {
       || /^172\.(1[6-9]|2\d|3[01])\./.test(hostname);
     const isLocalHost = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
     return url.protocol === 'http:'
-      && ['8081', '8082', '19006', '19080'].includes(url.port)
+      && ['8080', '8081', '8082', '19006', '19080'].includes(url.port)
       && (isPrivateAddress || isLocalHost);
   } catch {
     return false;
@@ -272,6 +321,97 @@ app.get('/health', async (_request, response) => {
   } catch {
     response.status(503).json({ ok: false, database: 'neon' });
   }
+});
+
+app.post('/api/admin/auth/register', authLimiter, async (request, response) => {
+  const input = parse(adminRegisterSchema, request, response); if (!input) return;
+  if (!adminRegistrationKey) return response.status(503).json({ ok: false, message: 'Administrator registration is not configured on this server.' });
+  const emailAddress = normalizeEmail(input.email);
+  if (!adminEmails.has(emailAddress)) return response.status(403).json({ ok: false, message: 'This email is not on the administrator allowlist.' });
+  const suppliedKey = Buffer.from(input.registrationKey);
+  const expectedKey = Buffer.from(adminRegistrationKey);
+  if (suppliedKey.length !== expectedKey.length || !crypto.timingSafeEqual(suppliedKey, expectedKey)) return response.status(401).json({ ok: false, message: 'The administrator registration key is incorrect.' });
+  const passwordError = passwordStrength(input.password, { fullName: input.fullName, username: input.username, email: emailAddress });
+  if (passwordError) return response.status(400).json({ ok: false, message: passwordError });
+  const existing = await query('SELECT id,email,is_admin AS "isAdmin" FROM users WHERE email=$1 OR lower(username)=lower($2)', [emailAddress, input.username]);
+  const sameEmail = existing.rows.find((row) => normalizeEmail(row.email) === emailAddress);
+  if (existing.rows.some((row) => normalizeEmail(row.email) !== emailAddress)) return response.status(409).json({ ok: false, message: 'That username is already in use.' });
+  if (sameEmail?.isAdmin) return response.status(409).json({ ok: false, message: 'An administrator account with this email already exists. Please sign in.' });
+  const user = { id: sameEmail?.id || crypto.randomUUID(), fullName: input.fullName, username: input.username, email: emailAddress, dateOfBirth: '', gender: '', region: '', about: '', passwordHash: bcrypt.hashSync(input.password, 12), isAdmin: true };
+  const now = Date.now();
+  await withTransaction(async (db) => {
+    if (sameEmail) {
+      await db.query('UPDATE users SET full_name=$1,username=$2,password_hash=$3,is_admin=TRUE WHERE id=$4', [user.fullName, user.username, user.passwordHash, user.id]);
+      await db.query('DELETE FROM sessions WHERE user_id=$1', [user.id]);
+    }
+    else await db.query('INSERT INTO users(id,full_name,username,email,date_of_birth,gender,region,about,password_hash,is_admin,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,TRUE,$10)', [user.id, user.fullName, user.username, user.email, user.dateOfBirth, user.gender, user.region, user.about, user.passwordHash, now]);
+    await db.query('INSERT INTO login_activity(id,user_id,device,created_at) VALUES($1,$2,$3,$4)', [crypto.randomUUID(), user.id, 'HabitAI Admin Console registration', now]);
+  });
+  response.status(201).json({ ok: true, token: await issueAdminJwt(user), user: userFromRow(user) });
+});
+
+app.post('/api/admin/auth/login', authLimiter, async (request, response) => {
+  const input = parse(loginSchema, request, response); if (!input) return;
+  const user = await findUser(normalizeEmail(input.email));
+  if (!user || !user.isAdmin || !adminEmails.has(normalizeEmail(input.email)) || !bcrypt.compareSync(input.password, user.passwordHash)) return response.status(401).json({ ok: false, message: 'Invalid administrator credentials or access is not enabled for this account.' });
+  await query('INSERT INTO login_activity(id,user_id,device,created_at) VALUES($1,$2,$3,$4)', [crypto.randomUUID(), user.id, input.device || request.get('user-agent')?.slice(0, 160) || 'Admin console', Date.now()]);
+  response.json({ ok: true, token: await issueAdminJwt(user), user: userFromRow(user) });
+});
+
+app.get('/api/admin/auth/me', async (request, response) => {
+  const admin = await requireAdmin(request, response);
+  if (admin) response.json({ ok: true, user: userFromRow(admin), role: 'admin' });
+});
+
+app.post('/api/admin/auth/logout', async (request, response) => {
+  const token = authToken(request);
+  if (token && verifyAdminJwt(token)) await query('DELETE FROM sessions WHERE token_hash=$1', [hashToken(token)]);
+  response.json({ ok: true });
+});
+
+app.get('/api/admin/overview', async (request, response) => {
+  if (!(await requireAdmin(request, response))) return;
+  const [users, habits, completions, reports, signups, activity, mlReady] = await Promise.all([
+    query('SELECT COUNT(*)::integer AS total, COUNT(*) FILTER (WHERE created_at >= $1)::integer AS new_this_month FROM users', [Date.now() - 30 * 24 * 60 * 60 * 1000]),
+    query('SELECT COUNT(*)::integer AS total FROM habits'),
+    query('SELECT COUNT(*)::integer AS total, COUNT(*) FILTER (WHERE completed_date >= CURRENT_DATE - INTERVAL \'6 days\')::integer AS last_7_days FROM habit_completions'),
+    query("SELECT COUNT(*)::integer AS total, COUNT(*) FILTER (WHERE status = 'open')::integer AS open FROM issue_reports"),
+    query("SELECT to_char(date_trunc('day', to_timestamp(created_at / 1000.0)), 'YYYY-MM-DD') AS date, COUNT(*)::integer AS count FROM users WHERE created_at >= $1 GROUP BY 1 ORDER BY 1", [Date.now() - 6 * 24 * 60 * 60 * 1000]),
+    query("SELECT to_char(completed_date, 'YYYY-MM-DD') AS date, COUNT(*)::integer AS count FROM habit_completions WHERE completed_date >= CURRENT_DATE - INTERVAL '6 days' GROUP BY 1 ORDER BY 1"),
+    isMlServiceReady(),
+  ]);
+  response.json({ ok: true, metrics: { users: users.rows[0], habits: habits.rows[0].total, completions: completions.rows[0], reports: reports.rows[0], ml: { configured: Boolean(mlKey), ready: mlReady } }, signups: signups.rows, activity: activity.rows });
+});
+
+app.get('/api/admin/users', async (request, response) => {
+  if (!(await requireAdmin(request, response))) return;
+  const search = String(request.query.search || '').trim().slice(0, 100);
+  const page = Math.max(1, Math.min(10000, Number(request.query.page) || 1));
+  const result = await query(`
+    SELECT u.id, u.full_name AS "fullName", u.username, u.email, u.region, u.created_at AS "createdAt",
+      (SELECT COUNT(*)::integer FROM habits h WHERE h.user_id=u.id) AS "habitCount",
+      (SELECT COUNT(*)::integer FROM habit_completions c WHERE c.user_id=u.id) AS "completionCount",
+      (SELECT MAX(login_date_time) FROM login_activity l WHERE l.user_id=u.id) AS "lastLogin"
+    FROM users u WHERE ($1 = '' OR u.full_name ILIKE '%' || $1 || '%' OR u.email ILIKE '%' || $1 || '%' OR u.username ILIKE '%' || $1 || '%')
+    ORDER BY u.created_at DESC LIMIT 25 OFFSET $2`, [search, (page - 1) * 25]);
+  const total = await query("SELECT COUNT(*)::integer AS total FROM users WHERE ($1 = '' OR full_name ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%' OR username ILIKE '%' || $1 || '%')", [search]);
+  response.json({ ok: true, users: result.rows, total: total.rows[0].total, page });
+});
+
+app.get('/api/admin/reports', async (request, response) => {
+  if (!(await requireAdmin(request, response))) return;
+  const result = await query(`SELECT r.id, r.topic, r.timing, r.description, r.attachment_name AS "attachmentName", r.status, r.created_at AS "createdAt", u.full_name AS "userName", u.email
+    FROM issue_reports r JOIN users u ON u.id=r.user_id ORDER BY r.created_at DESC LIMIT 100`);
+  response.json({ ok: true, reports: result.rows });
+});
+
+app.patch('/api/admin/reports/:id', async (request, response) => {
+  if (!(await requireAdmin(request, response))) return;
+  const parsed = z.object({ status: z.enum(['open', 'in_progress', 'resolved']) }).safeParse(request.body);
+  if (!parsed.success) return response.status(400).json({ ok: false, message: 'Choose a valid report status.' });
+  const result = await query('UPDATE issue_reports SET status=$1 WHERE id=$2 RETURNING id,status', [parsed.data.status, request.params.id]);
+  if (!result.rowCount) return response.status(404).json({ ok: false, message: 'Report not found.' });
+  response.json({ ok: true, report: result.rows[0] });
 });
 
 app.post('/api/auth/register', authLimiter, async (request, response) => {

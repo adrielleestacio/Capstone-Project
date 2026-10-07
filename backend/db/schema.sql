@@ -8,8 +8,10 @@ CREATE TABLE IF NOT EXISTS users (
   region TEXT NOT NULL DEFAULT '',
   about TEXT NOT NULL DEFAULT '',
   password_hash TEXT NOT NULL,
+  is_admin BOOLEAN NOT NULL DEFAULT FALSE,
   created_at BIGINT NOT NULL
 );
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE UNIQUE INDEX IF NOT EXISTS users_username_unique
   ON users (LOWER(username)) WHERE username <> '';

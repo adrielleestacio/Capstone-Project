@@ -129,6 +129,16 @@ if (allowedOrigins.length === 0 || isPlaceholderValue(values.ALLOWED_ORIGINS) ||
   if (isProduction) deployIssues.push('ALLOWED_ORIGINS must use the deployed frontend origins in production.');
   else warnings.push('ALLOWED_ORIGINS still contains local-only origins. Replace it with deployed origins before release.');
 }
+const configuredAdminEmails = String(values.ADMIN_EMAILS || '').split(',').map((email) => email.trim()).filter(Boolean);
+if (isProduction && (configuredAdminEmails.length === 0 || configuredAdminEmails.some((email) => isPlaceholderValue(email) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)))) {
+  deployIssues.push('ADMIN_EMAILS must list valid administrator email addresses in production.');
+}
+for (const secretName of ['ADMIN_JWT_SECRET', 'ADMIN_REGISTRATION_KEY']) {
+  const secret = String(values[secretName] || '').trim();
+  if (isProduction && (isPlaceholderValue(secret) || secret.length < 32)) {
+    deployIssues.push(`${secretName} must be a real random secret of at least 32 characters in production.`);
+  }
+}
 const publicApiUrl = values.EXPO_PUBLIC_API_URL || values.EXPO_PUBLIC_AI_API_URL;
 if (isProduction && (!publicApiUrl || !isHttpsUrl(publicApiUrl))) {
   deployIssues.push('EXPO_PUBLIC_API_URL must be a deployed HTTPS backend URL in production.');

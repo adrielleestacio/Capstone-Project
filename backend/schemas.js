@@ -6,6 +6,7 @@ export const registerSchema = z.object({ fullName: z.string().trim().min(2).max(
 export const profileSchema = z.object({ fullName: z.string().trim().min(2).max(100), username: z.string().trim().min(2).max(30).regex(/^[a-zA-Z0-9_.-]+$/), email: emailSchema, dateOfBirth: z.string().trim().max(40), gender: z.string().trim().max(40), about: z.string().trim().max(500) }).strict();
 export const profileUpdateSchema = profileSchema;
 export const loginSchema = z.object({ email: emailSchema, password: z.string().min(1).max(128), device: z.string().trim().max(160).optional() }).strict();
+export const adminRegisterSchema = z.object({ fullName: z.string().trim().min(2).max(100), username: z.string().trim().min(2).max(30).regex(/^[a-zA-Z0-9_.-]+$/), email: emailSchema, password: passwordSchema, registrationKey: z.string().min(1).max(200) }).strict();
 export const forgotPasswordSchema = z.object({ email: emailSchema }).strict();
 export const verifyOtpSchema = z.object({ email: emailSchema, otp: z.string().regex(/^\d{6}$/) }).strict();
 export const otpSchema = verifyOtpSchema;
